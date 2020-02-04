@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -7,6 +8,7 @@ using System.Xml.Serialization;
 using ILOG.CPLEX;
 using ILOG.Concert;
 using CargoDispatching.DataModel;
+using System.IO;
 
 namespace CargoDispatching.Algorithm
 {
@@ -46,6 +48,11 @@ namespace CargoDispatching.Algorithm
         /// yE[i] € N denotes the excess units assigned to cargo i.
         /// </summary>
         private List<INumVar> yE;
+
+        /// <summary>
+        /// u[j] € N stands for the number of unassigned units.
+        /// </summary>
+        private List<INumVar> u;
 
         /// <summary>
         /// List of cargo
@@ -92,6 +99,11 @@ namespace CargoDispatching.Algorithm
         /// </summary>
         private Int32 M;
 
+        /// <summary>
+        /// Cost for unsatisfied demand
+        /// </summary>
+        private Double _costOfUnsatisfied = 1000.0;
+
         public Model(List<Cargo> cargoList, List<Location> locationList)
         {
             _solver = new Cplex();
@@ -103,6 +115,7 @@ namespace CargoDispatching.Algorithm
             yR = new List<INumVar>();
             yE = new List<INumVar>();
             m = new List<INumVar>();
+            u = new List<INumVar>();
 
             _cargoList = cargoList;
             _locationList = locationList;
@@ -113,13 +126,29 @@ namespace CargoDispatching.Algorithm
         }
 
         /// <summary>
+        /// Result filepath
+        /// </summary>
+        private String _filePath = @"C:/Workspace/CargoDispatching/Result.csv";
+
+        /// <summary>
+        /// Culture info
+        /// </summary>
+        private CultureInfo _culture;
+
+        /// <summary>
         /// Run method where the running engine is triggered.
         /// </summary>
         public void Run()
         {
             BuildModel();
             Solve();
+            if (!(_status == Cplex.Status.Optimal || _status == Cplex.Status.Feasible))
+            {
+                Console.WriteLine("No feasible solution exists!");
+                return;
+            }
             Print();
+            WriteResults();
             ClearModel();
         }
 
@@ -208,6 +237,14 @@ namespace CargoDispatching.Algorithm
                 var m_i = _solver.NumVar(0, Int32.MaxValue, NumVarType.Int, name);
                 m.Add(m_i);
             }
+
+            // Create u[j] - variables
+            for (int j = 0; j < M; j++)
+            {
+                var name = $"u[{(j + 1)}]";
+                var u_j = _solver.NumVar(0, Int32.MaxValue, NumVarType.Int, name);
+                u.Add(u_j);
+            }
         }
 
         /// <summary>
@@ -228,6 +265,11 @@ namespace CargoDispatching.Algorithm
                 _objective.AddTerm(yR[i], regularCost);
                 _objective.AddTerm(yE[i], excessCost);
                 _objective.AddTerm(m[i], demurrageCost);
+            }
+
+            for (int j = 0; j < M; j++)
+            {
+                _objective.AddTerm(u[j], _costOfUnsatisfied);
             }
 
             _solver.AddMinimize(_objective);
@@ -266,6 +308,8 @@ namespace CargoDispatching.Algorithm
                         constraint.AddTerm(e[i][j], 1);
                     }
                 }
+
+                constraint.AddTerm(u[j], 1);
 
                 var forecast = location.GetForecast();
                 _solver.AddEq(constraint, forecast);
@@ -386,17 +430,51 @@ namespace CargoDispatching.Algorithm
             }
         }
 
+        private void WriteResults()
+        {
+            Encoding.GetEncoding("UTF-8");
+            var w = new StreamWriter(_filePath);
+
+            var header = "Location,Forecast";
+            for (int i = 0; i < N; i++)
+            {
+                header += String.Format(",{0}-Regular,{0}-Excess", _cargoList[i].GetId());
+
+            }
+
+            header += ",Unsatisfied";
+
+            w.WriteLine(header);
+
+            for (int j = 0; j < M; j++)
+            {
+
+                var location = _locationList[j];
+                var forecast = location.GetForecast();
+                var line = location.GetId();
+                line += "," + forecast;
+
+                for (int i = 0; i < N; i++)
+                {
+                    var x_ij = Math.Round(_solver.GetValue(x[i][j]), 0);
+                    var e_ij = Math.Round(_solver.GetValue(e[i][j]), 0);
+
+                    line += $",{x_ij},{e_ij}";
+                }
+
+                var u_j = Math.Round(_solver.GetValue(u[j]), 0);
+                line += $",{u_j}";
+
+                w.WriteLine(line, Encoding.UTF8);
+            }
+            w.Flush();
+        }
+
         /// <summary>
         /// Print some solution details
         /// </summary>
         private void Print()
         {
-            if (!(_status == Cplex.Status.Optimal || _status == Cplex.Status.Feasible))
-            {
-                Console.WriteLine("No feasible solution exists!");
-                return;
-            }
-             
             var objVal = _solver.GetObjValue();
             Console.WriteLine("\nTotal cost: {0} TL", objVal);
 
@@ -443,6 +521,14 @@ namespace CargoDispatching.Algorithm
                 var cargo = _cargoList[i];
 
                 Console.WriteLine("{0}\t:{1}", cargo.GetId(), yR_i + yE_i);
+            }
+
+            Console.WriteLine("\nTotal unsatisfied for each seller:");
+            for (int j = 0; j < M; j++)
+            {
+                var u_j = Math.Round(_solver.GetValue(u[j]), 0);
+                var location = _locationList[j];
+                Console.WriteLine("{0}   \t:{1}", location.GetId(), u_j);
             }
         }
 
